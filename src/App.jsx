@@ -557,7 +557,7 @@ export default function App() {
               📂 导入本地音频
               <input 
                 type="file" 
-                accept="audio/*" 
+                accept="audio/*, .mp3, .m4a, .wav, .aac, .ogg, audio/mpeg, audio/mp4, audio/x-m4a, audio/x-wav" 
                 onChange={handleFileChange} 
                 className="hidden" 
               />
@@ -643,9 +643,7 @@ export default function App() {
                 volumeBoost ? 'bg-lime-500' : 'bg-zinc-750'
               }`}
             >
-              <div className={`bg-zinc-950 w-4 h-4 rounded-full shadow-md transform transition-transform duration-200 ${
-                volumeBoost ? 'translate-x-5' : 'translate-x-0'
-              }`}></div>
+              <div className="bg-zinc-950 w-4 h-4 rounded-full shadow-md transform transition-transform duration-200 translate-x-5"></div>
             </button>
           </div>
 

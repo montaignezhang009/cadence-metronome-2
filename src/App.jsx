@@ -4,6 +4,51 @@ import { Play, Square, Plus, Minus, Volume2, Info, Check, HelpCircle, Music, Pau
 // 采用兼容性更好、长度更长、音量极微弱的 2秒静音 WAV 数据
 const SILENT_WAV = 'data:audio/wav;base64,UklGRpwAAABXQVZFZm10IBAAAAABAAEAIlYAAESsAAACABAAAGRhdGEAYAAAAP8f/x//H/8f/x//H/8f/x//H/8f/x//H/8f/x//H/8f/x//H/8f/x//H/8f/x//H/8f/x//H/8f/x//H/8f/x//H/8f/x//H/8f/x//H/8f/x//H/8f/x//H/8f/x//H/8f/x//H/8f/x//H/8f/x//H/8f/x//H/8f/x//H/8f/x//H/8f/x//H/8f/x//H/8f/x//H/8f/x//H/8f/x//H/8f/x//H/8f/x//H/8f/x//H/8f/x//H/8f/x//H/8f/x//H/8f/x//H/8f/x//H/8f/x//H/8f/x//H/8f/x//';
 
+// --- 外部辅助函数：实时在内存中合成高穿透力的节拍波形 ---
+const synthesizeTickToBuffer = (channelData, sampleRate, startIndex, type, isAccent, boost) => {
+  if (type === 'wood') {
+    // 传统木鱼清脆敲击声 - 指数衰减频率与振幅，穿透力极高
+    const duration = 0.05; // 50ms 爆破木鱼声
+    const numSamples = Math.floor(duration * sampleRate);
+    for (let i = 0; i < numSamples; i++) {
+      const t = i / sampleRate;
+      const amp = Math.exp(-t / 0.012) * (isAccent ? 0.95 : 0.6) * boost;
+      const fStart = isAccent ? 950 : 700;
+      const fEnd = 120;
+      const tau_f = 0.015;
+      // 完美的连续相位频率扫频算法，防止波形破音
+      const phase = 2 * Math.PI * (fEnd * t - (fStart - fEnd) * tau_f * (Math.exp(-t / tau_f) - 1));
+      channelData[startIndex + i] = Math.sin(phase) * amp;
+    }
+  } else if (type === 'drum') {
+    // 动感低沉鼓点 - 适合跑步重低音
+    const duration = 0.12; 
+    const numSamples = Math.floor(duration * sampleRate);
+    for (let i = 0; i < numSamples; i++) {
+      const t = i / sampleRate;
+      const amp = Math.exp(-t / 0.03) * (isAccent ? 1.0 : 0.65) * boost;
+      const fStart = isAccent ? 140 : 100;
+      const fEnd = 30;
+      const tau_f = 0.04;
+      const phase = 2 * Math.PI * (fEnd * t - (fStart - fEnd) * tau_f * (Math.exp(-t / tau_f) - 1));
+      const rawSine = Math.sin(phase);
+      // 利用 arcsin 将正弦波平滑转化为三角波，增加低音打击感
+      const triangle = (2 / Math.PI) * Math.asin(rawSine);
+      channelData[startIndex + i] = triangle * amp;
+    }
+  } else {
+    // 电子滴答音 - 纯净高频电子脉冲波
+    const duration = 0.04;
+    const numSamples = Math.floor(duration * sampleRate);
+    for (let i = 0; i < numSamples; i++) {
+      const t = i / sampleRate;
+      const amp = Math.exp(-t / 0.008) * (isAccent ? 0.6 : 0.35) * boost;
+      const freq = isAccent ? 1900 : 1500;
+      channelData[startIndex + i] = Math.sin(2 * Math.PI * freq * t) * amp;
+    }
+  }
+};
+
 export default function App() {
   // --- 状态管理 ---
   const [bpm, setBpm] = useState(150);
@@ -25,13 +70,15 @@ export default function App() {
 
   // --- 音频时钟核心 Ref 变量 ---
   const audioCtxRef = useRef(null);
-  const timerIdRef = useRef(null);
-  const nextTickTimeRef = useRef(0.0);
-  const currentBeatRef = useRef(0);
   const silentAudioRef = useRef(null);
   const localAudioRef = useRef(null); // 本地音乐播放器 HTML5 Audio 指针
 
-  // 保证高频定时器能实时拿到最新的 BPM 和设置，防止闭包失效
+  // 【核心机制重构】：使用 Web Audio 原生的硬件循环节点，替代不稳的 JS 定时器
+  const loopSourceRef = useRef(null);
+  const loopStartTimeRef = useRef(0);
+  const requestAnimationFrameRef = useRef(null);
+
+  // 保证高频渲染和保活动移动端能随时拿到最新的 BPM 和设置，防止状态闭包失效
   const bpmRef = useRef(bpm);
   const soundTypeRef = useRef(soundType);
   const accentModeRef = useRef(accentMode);
@@ -52,6 +99,26 @@ export default function App() {
     const m = Math.floor(secs / 60).toString().padStart(2, '0');
     const s = Math.floor(secs % 60).toString().padStart(2, '0');
     return `${m}:${s}`;
+  };
+
+  // --- 视觉动画帧同步器 (只在页面可见、且在运行状态下激活，完美省电) ---
+  const syncVisualLoop = () => {
+    if (!isPlayingRef.current || !audioCtxRef.current) return;
+
+    const ctx = audioCtxRef.current;
+    const elapsed = ctx.currentTime - loopStartTimeRef.current;
+    const beatDuration = 60.0 / bpmRef.current;
+    const cycleDuration = accentModeRef.current ? beatDuration * 2 : beatDuration;
+
+    // 根据高精度音频时钟，逆推当前的视觉闪烁状态
+    const positionInCycle = elapsed % cycleDuration;
+    const timeSinceLastBeatStart = positionInCycle % beatDuration;
+    
+    // 在每个打点开始的 120ms 内亮起外侧闪烁光环
+    const isFlashing = timeSinceLastBeatStart < 0.12;
+    setVisualBeat(isFlashing ? 1 : 0);
+
+    requestAnimationFrameRef.current = requestAnimationFrame(syncVisualLoop);
   };
 
   // --- 初始化与注销清理 ---
@@ -82,7 +149,7 @@ export default function App() {
     audio.addEventListener('ended', handleEnded);
 
     return () => {
-      if (timerIdRef.current) clearTimeout(timerIdRef.current);
+      if (requestAnimationFrameRef.current) cancelAnimationFrame(requestAnimationFrameRef.current);
       if (silentAudioRef.current) {
         try {
           silentAudioRef.current.pause();
@@ -96,6 +163,60 @@ export default function App() {
       }
     };
   }, []);
+
+  // --- 动态无感无缝切换硬件节拍 Loop ---
+  const updateAudioBufferLoop = () => {
+    const ctx = audioCtxRef.current;
+    if (!ctx || !isPlayingRef.current) return;
+
+    const bpmValue = bpmRef.current;
+    const soundTypeValue = soundTypeRef.current;
+    const accentModeValue = accentModeRef.current;
+    const boost = volumeBoostRef.current ? 2.2 : 1.0;
+
+    const beatDuration = 60.0 / bpmValue;
+    const cycleDuration = accentModeValue ? beatDuration * 2 : beatDuration;
+
+    const sampleRate = ctx.sampleRate;
+    const totalSamples = Math.floor(cycleDuration * sampleRate);
+    const buffer = ctx.createBuffer(1, totalSamples, sampleRate);
+    const channelData = buffer.getChannelData(0);
+
+    // 内存生成第一拍
+    synthesizeTickToBuffer(channelData, sampleRate, 0, soundTypeValue, accentModeValue, boost);
+
+    // 内存生成第二拍 (若开启了交替平衡模式)
+    if (accentModeValue) {
+      const beat2StartIndex = Math.floor(beatDuration * sampleRate);
+      synthesizeTickToBuffer(channelData, sampleRate, beat2StartIndex, soundTypeValue, false, boost);
+    }
+
+    // 新建缓冲播放节点
+    const newSource = ctx.createBufferSource();
+    newSource.buffer = buffer;
+    newSource.loop = true;
+    newSource.connect(ctx.destination);
+
+    const now = ctx.currentTime;
+    newSource.start(now);
+
+    // 销毁和替换前一个硬件播放节点，实现无缝参数调整
+    if (loopSourceRef.current) {
+      try {
+        loopSourceRef.current.stop(now);
+      } catch (e) {}
+    }
+
+    loopSourceRef.current = newSource;
+    loopStartTimeRef.current = now;
+  };
+
+  // 监听参数变化，动态调整硬件音频缓冲
+  useEffect(() => {
+    if (isPlaying) {
+      updateAudioBufferLoop();
+    }
+  }, [bpm, soundType, accentMode, volumeBoost]);
 
   // --- 处理本地音乐文件加载 ---
   const handleFileChange = (e) => {
@@ -123,7 +244,6 @@ export default function App() {
       audio.pause();
       setLocalPlaying(false);
     } else {
-      // 激活音频上下文，确保跟 Web Audio 同步
       if (audioCtxRef.current && audioCtxRef.current.state === 'suspended') {
         audioCtxRef.current.resume();
       }
@@ -220,130 +340,37 @@ export default function App() {
     }
   };
 
-  // --- 音频发声合成器 ---
-  const scheduleTick = (time, beatNumber) => {
-    const ctx = audioCtxRef.current;
-    if (!ctx) return;
-
-    const osc = ctx.createOscillator();
-    const gainNode = ctx.createGain();
-    osc.connect(gainNode);
-    gainNode.connect(ctx.destination);
-
-    const type = soundTypeRef.current;
-    const isAccent = accentModeRef.current && (beatNumber % 2 === 0);
-    
-    // 超强音量增益倍率 (2.2倍，故意制造轻微削波，使敲击声在耳机里极度清脆和穿透)
-    const boost = volumeBoostRef.current ? 2.2 : 1.0;
-
-    if (type === 'wood') {
-      osc.type = 'sine';
-      osc.frequency.setValueAtTime(isAccent ? 950 : 700, time);
-      osc.frequency.exponentialRampToValueAtTime(120, time + 0.05);
-
-      gainNode.gain.setValueAtTime((isAccent ? 0.95 : 0.6) * boost, time);
-      gainNode.gain.exponentialRampToValueAtTime(0.001, time + 0.05);
-
-      osc.start(time);
-      osc.stop(time + 0.06);
-    } else if (type === 'drum') {
-      osc.type = 'triangle';
-      osc.frequency.setValueAtTime(isAccent ? 140 : 100, time);
-      osc.frequency.exponentialRampToValueAtTime(30, time + 0.12);
-
-      gainNode.gain.setValueAtTime((isAccent ? 1.0 : 0.65) * boost, time);
-      gainNode.gain.exponentialRampToValueAtTime(0.001, time + 0.12);
-
-      osc.start(time);
-      osc.stop(time + 0.13);
-    } else {
-      osc.type = 'sine';
-      osc.frequency.setValueAtTime(isAccent ? 1900 : 1500, time);
-
-      const filter = ctx.createBiquadFilter();
-      filter.type = 'bandpass';
-      filter.frequency.value = isAccent ? 1900 : 1500;
-      filter.Q.value = 2.0;
-
-      osc.disconnect(gainNode);
-      osc.connect(filter);
-      filter.connect(gainNode);
-
-      gainNode.gain.setValueAtTime((isAccent ? 0.6 : 0.35) * boost, time);
-      gainNode.gain.exponentialRampToValueAtTime(0.001, time + 0.04);
-
-      osc.start(time);
-      osc.stop(time + 0.05);
-    }
-  };
-
-  // --- 高精准度后台调度器线程 ---
-  const scheduleAheadTime = 0.12; 
-  const lookahead = 30.0; 
-
-  const metronomeScheduler = () => {
-    const ctx = audioCtxRef.current;
-    if (!ctx || !isPlayingRef.current) return;
-
-    while (nextTickTimeRef.current < ctx.currentTime + scheduleAheadTime) {
-      const scheduledTime = nextTickTimeRef.current;
-      const beat = currentBeatRef.current;
-
-      scheduleTick(scheduledTime, beat);
-
-      const secondsPerBeat = 60.0 / bpmRef.current;
-      nextTickTimeRef.current += secondsPerBeat;
-
-      const delayMs = Math.max(0, (scheduledTime - ctx.currentTime) * 1000);
-      setTimeout(() => {
-        if (isPlayingRef.current) {
-          setVisualBeat(prev => (prev + 1) % 2);
-          if (vibrateRef.current) {
-            triggerVibration();
-          }
-        }
-      }, delayMs);
-
-      currentBeatRef.current = (currentBeatRef.current + 1) % 2;
-    }
-
-    timerIdRef.current = setTimeout(metronomeScheduler, lookahead);
-  };
-
   // --- 节拍器启动逻辑 ---
   const startMetronome = () => {
     try {
-      // 1. 彻底销毁和重置任何历史音频上下文，避免挂起锁定
+      // 1. 彻底销毁和重置任何历史音频上下文
       if (audioCtxRef.current) {
-        try {
-          audioCtxRef.current.close();
-        } catch (e) {}
+        try { audioCtxRef.current.close(); } catch (e) {}
         audioCtxRef.current = null;
       }
       if (silentAudioRef.current) {
-        try {
-          silentAudioRef.current.pause();
-        } catch (e) {}
+        try { silentAudioRef.current.pause(); } catch (e) {}
         silentAudioRef.current = null;
       }
+      if (loopSourceRef.current) {
+        try { loopSourceRef.current.stop(); } catch (e) {}
+        loopSourceRef.current = null;
+      }
 
-      // 2. 创建全新的混音音频环境
+      // 2. 创建全新的音频渲染上下文
       const ctx = new (window.AudioContext || window.webkitAudioContext)();
       audioCtxRef.current = ctx;
 
-      // 3. 必须在同步点击手势回调的第一时间，创建并播放 Audio 标签
+      // 3. 手势第一时间开启保活动作
       const audio = new Audio(SILENT_WAV);
       audio.loop = true;
-      audio.volume = 0.05; // 微弱音量使系统保活器保持活跃
+      audio.volume = 0.05;
       silentAudioRef.current = audio;
 
-      // 4. 【核心保活混音机制】：
-      // 将 HTML5 的无声 Audio 节点重定向挂载到 Web Audio 图中！
-      // 只要挂载了，iOS 系统就会将该媒体播放降级为“音效/Ambient”级别，从而绝不暂停伴跑音乐，实现完美混音！
+      // 重定向静音到 Web Audio
       const source = ctx.createMediaElementSource(audio);
       source.connect(ctx.destination);
 
-      // 5. 同步播放
       audio.play().catch(e => {
         console.warn("同步手势保活播放受阻，尝试恢复：", e);
       });
@@ -354,14 +381,42 @@ export default function App() {
 
       setupMediaSession();
 
-      nextTickTimeRef.current = ctx.currentTime + 0.05;
-      currentBeatRef.current = 0;
-
       setIsPlaying(true);
       isPlayingRef.current = true;
-      metronomeScheduler();
 
-      // 如果导入了音乐但未播放，在点START时可同步开启伴跑音乐，带来丝滑体验
+      // 4. 初始化硬件音频内存循环节点（利用浏览器底层 C++ 音频渲染线程进行完美循环）
+      const beatDuration = 60.0 / bpmRef.current;
+      const cycleDuration = accentModeRef.current ? beatDuration * 2 : beatDuration;
+      const sampleRate = ctx.sampleRate;
+      const totalSamples = Math.floor(cycleDuration * sampleRate);
+      const buffer = ctx.createBuffer(1, totalSamples, sampleRate);
+      const channelData = buffer.getChannelData(0);
+      const boost = volumeBoostRef.current ? 2.2 : 1.0;
+
+      // 第一拍
+      synthesizeTickToBuffer(channelData, sampleRate, 0, soundTypeRef.current, accentModeRef.current, boost);
+
+      // 第二拍 (强弱交替)
+      if (accentModeRef.current) {
+        const beat2StartIndex = Math.floor(beatDuration * sampleRate);
+        synthesizeTickToBuffer(channelData, sampleRate, beat2StartIndex, soundTypeRef.current, false, boost);
+      }
+
+      const loopSource = ctx.createBufferSource();
+      loopSource.buffer = buffer;
+      loopSource.loop = true;
+      loopSource.connect(ctx.destination);
+
+      const now = ctx.currentTime;
+      loopSource.start(now);
+      loopSourceRef.current = loopSource;
+      loopStartTimeRef.current = now;
+
+      // 启动对准真实硬件时钟的视觉同步帧动画（仅在前台运行时消费，切后台自动挂起以省电）
+      if (requestAnimationFrameRef.current) cancelAnimationFrame(requestAnimationFrameRef.current);
+      requestAnimationFrameRef.current = requestAnimationFrame(syncVisualLoop);
+
+      // 同步开启本地伴跑
       if (localFile && !localPlaying && localAudioRef.current) {
         localAudioRef.current.play().catch(() => {});
         setLocalPlaying(true);
@@ -378,9 +433,17 @@ export default function App() {
     setIsPlaying(false);
     isPlayingRef.current = false;
 
-    if (timerIdRef.current) {
-      clearTimeout(timerIdRef.current);
-      timerIdRef.current = null;
+    if (requestAnimationFrameRef.current) {
+      cancelAnimationFrame(requestAnimationFrameRef.current);
+      requestAnimationFrameRef.current = null;
+    }
+
+    // 释放循环播放节点
+    if (loopSourceRef.current) {
+      try {
+        loopSourceRef.current.stop();
+      } catch (e) {}
+      loopSourceRef.current = null;
     }
 
     // 释放保活静音音频
@@ -391,7 +454,7 @@ export default function App() {
       silentAudioRef.current = null;
     }
 
-    // 暂停时立刻释放 Web Audio 上下文，防止其状态在手机底层挂起锁死
+    // 彻底销毁上下文
     if (audioCtxRef.current) {
       try {
         audioCtxRef.current.close();
@@ -399,7 +462,6 @@ export default function App() {
       audioCtxRef.current = null;
     }
 
-    // 暂停节拍器时，可选择同步暂停本地伴跑音乐
     if (localPlaying && localAudioRef.current) {
       localAudioRef.current.pause();
       setLocalPlaying(false);
@@ -449,7 +511,7 @@ export default function App() {
           <ul className="list-disc pl-5 space-y-1.5 text-xs text-zinc-400">
             <li><strong>外部播放：</strong>先开启 Apple Music 或网易云放歌，然后打开本页面，点击 <span className="text-lime-400">START</span> 即可混音！</li>
             <li><strong>完美伴跑本地音乐：</strong>如果你播放的是保存在手机中的 MP3 文件，请使用下方专有的“本地音乐伴跑”面板，直接导入播放。这样声音绝对不会冲突，且后台更稳定！</li>
-            <li><strong>遇到无声：</strong>如果切出再切回时无声，直接点击 <span className="text-red-400">STOP</span> 再点 <span className="text-lime-400">START</span>，系统会自动重构音频引擎，无需重启网页。</li>
+            <li><strong>后台不挂断（重构修复）：</strong>全新硬件级时钟已部署。现在锁屏、切回主屏或切到其他 App，节拍声将同 MP3 音乐一道，永久挂在后台高精度正常鸣响，不再因 JS 冻结而挂断！</li>
           </ul>
         </div>
       )}
@@ -458,10 +520,10 @@ export default function App() {
       <main className="flex-1 flex flex-col justify-center items-center py-6">
         <div className="relative flex items-center justify-center w-56 h-56 mb-5">
           
-          {/* 外圈光环 - 与节奏实时闪烁同步 */}
+          {/* 外圈光环 - 与节奏真实时钟闪烁同步 */}
           <div className={`absolute inset-0 rounded-full border-4 transition-all duration-75 ${
             isPlaying 
-              ? (visualBeat === 0 ? 'border-lime-500 scale-105 opacity-80 shadow-[0_0_30px_rgba(132,204,22,0.4)]' : 'border-lime-700 scale-100 opacity-45')
+              ? (visualBeat === 1 ? 'border-lime-500 scale-105 opacity-80 shadow-[0_0_30px_rgba(132,204,22,0.4)]' : 'border-lime-700 scale-100 opacity-45')
               : 'border-zinc-800 opacity-20'
           }`}></div>
 
@@ -643,7 +705,9 @@ export default function App() {
                 volumeBoost ? 'bg-lime-500' : 'bg-zinc-750'
               }`}
             >
-              <div className="bg-zinc-950 w-4 h-4 rounded-full shadow-md transform transition-transform duration-200 translate-x-5"></div>
+              <div className={`bg-zinc-950 w-4 h-4 rounded-full shadow-md transform transition-transform duration-200 ${
+                volumeBoost ? 'translate-x-5' : 'translate-x-0'
+              }`}></div>
             </button>
           </div>
 

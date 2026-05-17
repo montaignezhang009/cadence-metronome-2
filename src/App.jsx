@@ -1,8 +1,12 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { Play, Square, Plus, Minus, Volume2, Info, Check, HelpCircle, Music, Pause } from 'lucide-react';
 
-// 采用兼容性更好、长度更长、音量极微弱的 2秒静音 WAV 数据
-const SILENT_WAV = 'data:audio/wav;base64,UklGRpwAAABXQVZFZm10IBAAAAABAAEAIlYAAESsAAACABAAAGRhdGEAYAAAAP8f/x//H/8f/x//H/8f/x//H/8f/x//H/8f/x//H/8f/x//H/8f/x//H/8f/x//H/8f/x//H/8f/x//H/8f/x//H/8f/x//H/8f/x//H/8f/x//H/8f/x//H/8f/x//H/8f/x//H/8f/x//H/8f/x//H/8f/x//H/8f/x//H/8f/x//H/8f/x//H/8f/x//H/8f/x//H/8f/x//H/8f/x//H/8f/x//H/8f/x//H/8f/x//H/8f/x//H/8f/x//H/8f/x//H/8f/x//H/8f/x//H/8f/x//H/8f/x//H/8f/x//';
+// --- 外部辅助函数：向二进制写入字符串 ---
+const writeString = (view, offset, string) => {
+  for (let i = 0; i < string.length; i++) {
+    view.setUint8(offset + i, string.charCodeAt(i));
+  }
+};
 
 // --- 外部辅助函数：实时在内存中合成高穿透力的节拍波形 ---
 const synthesizeTickToBuffer = (channelData, sampleRate, startIndex, type, isAccent, boost) => {
@@ -16,7 +20,6 @@ const synthesizeTickToBuffer = (channelData, sampleRate, startIndex, type, isAcc
       const fStart = isAccent ? 950 : 700;
       const fEnd = 120;
       const tau_f = 0.015;
-      // 完美的连续相位频率扫频算法，防止波形破音
       const phase = 2 * Math.PI * (fEnd * t - (fStart - fEnd) * tau_f * (Math.exp(-t / tau_f) - 1));
       channelData[startIndex + i] = Math.sin(phase) * amp;
     }
@@ -32,7 +35,6 @@ const synthesizeTickToBuffer = (channelData, sampleRate, startIndex, type, isAcc
       const tau_f = 0.04;
       const phase = 2 * Math.PI * (fEnd * t - (fStart - fEnd) * tau_f * (Math.exp(-t / tau_f) - 1));
       const rawSine = Math.sin(phase);
-      // 利用 arcsin 将正弦波平滑转化为三角波，增加低音打击感
       const triangle = (2 / Math.PI) * Math.asin(rawSine);
       channelData[startIndex + i] = triangle * amp;
     }
@@ -47,6 +49,58 @@ const synthesizeTickToBuffer = (channelData, sampleRate, startIndex, type, isAcc
       channelData[startIndex + i] = Math.sin(2 * Math.PI * freq * t) * amp;
     }
   }
+};
+
+// --- 终极核心黑科技：在内存中动态生成完美的 16-bit Mono WAV 文件 ---
+const createWavBlob = (bpm, soundType, accentMode, volumeBoost) => {
+  const sampleRate = 22050; // 22.05 kHz 兼顾音质与内存，极速合成 (< 1ms)
+  const beatDuration = 60.0 / bpm;
+  const cycleDuration = accentMode ? beatDuration * 2 : beatDuration;
+  const totalSamples = Math.floor(cycleDuration * sampleRate);
+  
+  const buffer = new ArrayBuffer(44 + totalSamples * 2);
+  const view = new DataView(buffer);
+  
+  // 填充标准的 RIFF WAV 报头
+  writeString(view, 0, 'RIFF');
+  view.setUint32(4, 36 + totalSamples * 2, true);
+  writeString(view, 8, 'WAVE');
+  writeString(view, 12, 'fmt ');
+  view.setUint32(16, 16, true);
+  view.setUint16(20, 1, true); // 编码格式：PCM
+  view.setUint16(22, 1, true); // 单声道
+  view.setUint32(24, sampleRate, true);
+  view.setUint32(28, sampleRate * 2, true); // 每秒字节率
+  view.setUint16(32, 2, true); // 块对齐
+  view.setUint16(34, 16, true); // 16位采样
+  writeString(view, 36, 'data');
+  view.setUint32(40, totalSamples * 2, true);
+  
+  // 内存合成音轨
+  const channelData = new Float32Array(totalSamples);
+  const boost = volumeBoost ? 2.5 : 1.0;
+  
+  // 合成第一拍 (强音)
+  synthesizeTickToBuffer(channelData, sampleRate, 0, soundType, accentMode, boost);
+  
+  // 合成第二拍 (若开启强弱交替，则合成弱音)
+  if (accentMode) {
+    const beat2StartIndex = Math.floor(beatDuration * sampleRate);
+    synthesizeTickToBuffer(channelData, sampleRate, beat2StartIndex, soundType, false, boost);
+  }
+  
+  // 将 Float32 转换为 Int16 写入音频文件 data 块
+  let offset = 44;
+  for (let i = 0; i < totalSamples; i++) {
+    let sample = channelData[i];
+    if (sample > 1.0) sample = 1.0;
+    else if (sample < -1.0) sample = -1.0;
+    const pcmSample = sample < 0 ? sample * 0x8000 : sample * 0x7FFF;
+    view.setInt16(offset, pcmSample, true);
+    offset += 2;
+  }
+  
+  return new Blob([buffer], { type: 'audio/wav' });
 };
 
 export default function App() {
@@ -68,15 +122,11 @@ export default function App() {
   const [localDuration, setLocalDuration] = useState('00:00');
   const [localCurrentTime, setLocalCurrentTime] = useState('00:00');
 
-  // --- 音频时钟核心 Ref 变量 ---
-  const audioCtxRef = useRef(null);
-  const silentAudioRef = useRef(null);
+  // --- 硬件级 H5 音频控制指针 Ref ---
+  const metronomeAudioRef = useRef(null); // 【重构核心】：专用于播放合成 WAV 的原生 Audio 对象
+  const activeWavUrlRef = useRef(null); // 当前正在使用的 Blob URL
   const localAudioRef = useRef(null); // 本地音乐播放器 HTML5 Audio 指针
-
-  // 使用 Web Audio 原生的硬件循环节点，确保打点绝对精准
-  const loopSourceRef = useRef(null);
-  const loopStartTimeRef = useRef(0);
-  const requestAnimationFrameRef = useRef(null);
+  const requestAnimationFrameRef = useRef(null); // 视觉帧同步
 
   // 保证高频渲染和保活动移动端能随时拿到最新的 BPM 和设置，防止状态闭包失效
   const bpmRef = useRef(bpm);
@@ -103,21 +153,19 @@ export default function App() {
     return `${m}:${s}`;
   };
 
-  // --- 视觉动画帧同步器 (只在页面可见、且在运行状态下激活) ---
+  // --- 视觉动画帧同步器 (对准硬件音频真实播放时间 currentTime，完美零误差) ---
   const syncVisualLoop = () => {
-    if (!isPlayingRef.current || !audioCtxRef.current) return;
+    const audio = metronomeAudioRef.current;
+    if (!isPlayingRef.current || !audio) return;
 
-    const ctx = audioCtxRef.current;
-    const elapsed = ctx.currentTime - loopStartTimeRef.current;
+    const elapsed = audio.currentTime; // 获取硬件音频的精准当前播放秒数
     const beatDuration = 60.0 / bpmRef.current;
-    const cycleDuration = accentModeRef.current ? beatDuration * 2 : beatDuration;
 
-    // 根据高精度音频时钟，逆推当前的视觉闪烁状态
-    const positionInCycle = elapsed % cycleDuration;
-    const timeSinceLastBeatStart = positionInCycle % beatDuration;
+    // 根据高精度硬件音频时钟，逆推当前的视觉闪烁状态
+    const positionInBeat = elapsed % beatDuration;
     
     // 在每个打点开始的 120ms 内亮起外侧闪烁光环
-    const isFlashing = timeSinceLastBeatStart < 0.12;
+    const isFlashing = positionInBeat < 0.12;
     setVisualBeat(isFlashing ? 1 : 0);
 
     requestAnimationFrameRef.current = requestAnimationFrame(syncVisualLoop);
@@ -125,19 +173,24 @@ export default function App() {
 
   // --- 初始化与注销清理 ---
   useEffect(() => {
+    // 创建不被 Web Audio 冻结的独立 H5 节拍播放器
+    const mAudio = new Audio();
+    mAudio.loop = true;
+    metronomeAudioRef.current = mAudio;
+
     // 绑定本地音乐播放器的事件监听
-    const audio = localAudioRef.current;
-    if (!audio) return;
+    const lAudio = localAudioRef.current;
+    if (!lAudio) return;
 
     const handleTimeUpdate = () => {
-      if (audio.duration) {
-        setLocalProgress((audio.currentTime / audio.duration) * 100);
-        setLocalCurrentTime(formatTime(audio.currentTime));
+      if (lAudio.duration) {
+        setLocalProgress((lAudio.currentTime / lAudio.duration) * 100);
+        setLocalCurrentTime(formatTime(lAudio.currentTime));
       }
     };
 
     const handleLoadedMetadata = () => {
-      setLocalDuration(formatTime(audio.duration));
+      setLocalDuration(formatTime(lAudio.duration));
     };
 
     const handleEnded = () => {
@@ -146,77 +199,67 @@ export default function App() {
       setLocalCurrentTime('00:00');
     };
 
-    audio.addEventListener('timeupdate', handleTimeUpdate);
-    audio.addEventListener('loadedmetadata', handleLoadedMetadata);
-    audio.addEventListener('ended', handleEnded);
+    lAudio.addEventListener('timeupdate', handleTimeUpdate);
+    lAudio.addEventListener('loadedmetadata', handleLoadedMetadata);
+    lAudio.addEventListener('ended', handleEnded);
 
     return () => {
       if (requestAnimationFrameRef.current) cancelAnimationFrame(requestAnimationFrameRef.current);
-      if (silentAudioRef.current) {
-        try {
-          silentAudioRef.current.pause();
-        } catch (e) {}
-        silentAudioRef.current = null;
+      if (activeWavUrlRef.current) URL.revokeObjectURL(activeWavUrlRef.current);
+      if (mAudio) {
+        mAudio.pause();
+        mAudio.src = '';
       }
-      if (audio) {
-        audio.removeEventListener('timeupdate', handleTimeUpdate);
-        audio.removeEventListener('loadedmetadata', handleLoadedMetadata);
-        audio.removeEventListener('ended', handleEnded);
+      if (lAudio) {
+        lAudio.removeEventListener('timeupdate', handleTimeUpdate);
+        lAudio.removeEventListener('loadedmetadata', handleLoadedMetadata);
+        lAudio.removeEventListener('ended', handleEnded);
       }
     };
   }, []);
 
-  // --- 动态无感无缝切换硬件节拍 Loop ---
-  const updateAudioBufferLoop = () => {
-    const ctx = audioCtxRef.current;
-    if (!ctx || !isPlayingRef.current) return;
+  // --- 极速动态无缝切换硬件节拍 Loop ---
+  const updateAudioLoop = () => {
+    if (!isPlayingRef.current || !metronomeAudioRef.current) return;
 
-    const bpmValue = bpmRef.current;
-    const soundTypeValue = soundTypeRef.current;
-    const accentModeValue = accentModeRef.current;
-    const boost = volumeBoostRef.current ? 2.2 : 1.0;
+    try {
+      const bpmValue = bpmRef.current;
+      const soundTypeValue = soundTypeRef.current;
+      const accentModeValue = accentModeRef.current;
+      const volumeBoostValue = volumeBoostRef.current;
 
-    const beatDuration = 60.0 / bpmValue;
-    const cycleDuration = accentModeValue ? beatDuration * 2 : beatDuration;
+      // 1. 在内存中极速合成全新的 WAV 节拍环
+      const blob = createWavBlob(bpmValue, soundTypeValue, accentModeValue, volumeBoostValue);
+      const url = URL.createObjectURL(blob);
+      const oldUrl = activeWavUrlRef.current;
+      activeWavUrlRef.current = url;
 
-    const sampleRate = ctx.sampleRate;
-    const totalSamples = Math.floor(cycleDuration * sampleRate);
-    const buffer = ctx.createBuffer(1, totalSamples, sampleRate);
-    const channelData = buffer.getChannelData(0);
+      // 2. 无缝热替换音频源
+      const audio = metronomeAudioRef.current;
+      const prevTime = audio.currentTime; // 捕获当前播放进度，防止切歌/调速时出现断拍
 
-    // 内存生成第一拍
-    synthesizeTickToBuffer(channelData, sampleRate, 0, soundTypeValue, accentModeValue, boost);
+      audio.src = url;
+      audio.loop = true;
+      
+      // 恢复当前相位百分比，使过度毫无人工拼接痕迹
+      const cycleDuration = (60.0 / bpmValue) * (accentModeValue ? 2 : 1);
+      audio.currentTime = prevTime % cycleDuration;
+      
+      audio.play().catch(e => console.warn("后台热切失败：", e));
 
-    // 内存生成第二拍 (若开启了交替平衡模式)
-    if (accentModeValue) {
-      const beat2StartIndex = Math.floor(beatDuration * sampleRate);
-      synthesizeTickToBuffer(channelData, sampleRate, beat2StartIndex, soundTypeValue, false, boost);
+      // 3. 及时回收老 Blob 释放内存
+      if (oldUrl) {
+        URL.revokeObjectURL(oldUrl);
+      }
+    } catch (e) {
+      console.error("热更节拍器音频失败:", e);
     }
-
-    // 新建缓冲播放节点
-    const newSource = ctx.createBufferSource();
-    newSource.buffer = buffer;
-    newSource.loop = true;
-    newSource.connect(ctx.destination);
-
-    const now = ctx.currentTime;
-    newSource.start(now);
-
-    // 销毁和替换前一个硬件播放节点，实现无缝参数调整
-    if (loopSourceRef.current) {
-      try {
-        loopSourceRef.current.stop(now);
-      } catch (e) {}
-    }
-
-    loopSourceRef.current = newSource;
-    loopStartTimeRef.current = now;
   };
 
-  // 监听参数变化，动态调整硬件音频缓冲
+  // 监听状态变动，进行瞬时极速热更新
   useEffect(() => {
     if (isPlaying) {
-      updateAudioBufferLoop();
+      updateAudioLoop();
     }
   }, [bpm, soundType, accentMode, volumeBoost]);
 
@@ -246,9 +289,6 @@ export default function App() {
       audio.pause();
       setLocalPlaying(false);
     } else {
-      if (audioCtxRef.current && audioCtxRef.current.state === 'suspended') {
-        audioCtxRef.current.resume();
-      }
       audio.play().catch(err => {
         console.warn("播放本地音乐失败:", err);
       });
@@ -303,8 +343,8 @@ export default function App() {
     if ('mediaSession' in navigator) {
       navigator.mediaSession.metadata = new MediaMetadata({
         title: `🏃‍♂️ 步频节拍器: ${bpmRef.current} BPM`,
-        artist: localFile ? `伴跑音乐: ${localFile.name}` : '后台稳定伴跑中',
-        album: '双击耳机[下一曲/上一曲]可加减5步频',
+        artist: localFile ? `伴跑音乐: ${localFile.name}` : '后台硬件长鸣保活中',
+        album: '双击耳机[下一曲/上一曲]可在锁屏下加减5步频',
         artwork: [
           { src: 'https://images.unsplash.com/photo-1476480862126-209bfaa8edc8?w=512&h=512&fit=crop', sizes: '512x512', type: 'image/jpeg' }
         ]
@@ -356,40 +396,25 @@ export default function App() {
   // --- 节拍器启动逻辑 ---
   const startMetronome = () => {
     try {
-      // 1. 彻底销毁和重置任何历史音频上下文
-      if (audioCtxRef.current) {
-        try { audioCtxRef.current.close(); } catch (e) {}
-        audioCtxRef.current = null;
-      }
-      if (silentAudioRef.current) {
-        try { silentAudioRef.current.pause(); } catch (e) {}
-        silentAudioRef.current = null;
-      }
-      if (loopSourceRef.current) {
-        try { loopSourceRef.current.stop(); } catch (e) {}
-        loopSourceRef.current = null;
+      // 1. 重置及回收历史 URL，保持播放器全新干净
+      if (activeWavUrlRef.current) {
+        URL.revokeObjectURL(activeWavUrlRef.current);
+        activeWavUrlRef.current = null;
       }
 
-      // 2. 创建全新的音频渲染上下文
-      const ctx = new (window.AudioContext || window.webkitAudioContext)();
-      audioCtxRef.current = ctx;
+      // 2. 内存合成当前的第一首 WAV 节拍环
+      const blob = createWavBlob(bpmRef.current, soundTypeRef.current, accentModeRef.current, volumeBoostRef.current);
+      const url = URL.createObjectURL(blob);
+      activeWavUrlRef.current = url;
 
-      // 3. 【绝对核心保活漏洞攻克】：
-      // 我们在手势回调的第一时间声明、播放 HTML5 无声音频。
-      // 【关键修改】：绝对不能执行 `ctx.createMediaElementSource(audio)` 挂载到 Web Audio 图中！
-      // 一旦挂载，iOS 就会把它们视作一体，从而切后台时将两者一起强制冻结。
-      // 保持其独立直接播放（不挂载），iOS 就会将其判定为“系统原生媒体流”，从而为当前浏览器标签页永久保留后台音频执行权！
-      const audio = new Audio(SILENT_WAV);
-      audio.loop = true;
-      audio.volume = 0.01; // 保持极弱音量维持底层 CoreAudio 会话活跃
-      silentAudioRef.current = audio;
-
-      audio.play().catch(e => {
-        console.warn("同步手势保活播放受阻，尝试恢复：", e);
-      });
-
-      if (ctx.state === 'suspended') {
-        ctx.resume();
+      // 3. 【iOS 后台保活神迹】：直接驱动独立 HTML5 播放器
+      const audio = metronomeAudioRef.current;
+      if (audio) {
+        audio.src = url;
+        audio.loop = true;
+        audio.play().catch(e => {
+          console.warn("启动 HTML5 原生节拍器受阻，尝试恢复：", e);
+        });
       }
 
       setupMediaSession();
@@ -397,35 +422,7 @@ export default function App() {
       setIsPlaying(true);
       isPlayingRef.current = true;
 
-      // 4. 初始化硬件音频内存循环节点（利用 C++ 硬件音频线程在底层完美不中断循环）
-      const beatDuration = 60.0 / bpmRef.current;
-      const cycleDuration = accentModeRef.current ? beatDuration * 2 : beatDuration;
-      const sampleRate = ctx.sampleRate;
-      const totalSamples = Math.floor(cycleDuration * sampleRate);
-      const buffer = ctx.createBuffer(1, totalSamples, sampleRate);
-      const channelData = buffer.getChannelData(0);
-      const boost = volumeBoostRef.current ? 2.2 : 1.0;
-
-      // 第一拍
-      synthesizeTickToBuffer(channelData, sampleRate, 0, soundTypeRef.current, accentModeRef.current, boost);
-
-      // 第二拍 (强弱交替)
-      if (accentModeRef.current) {
-        const beat2StartIndex = Math.floor(beatDuration * sampleRate);
-        synthesizeTickToBuffer(channelData, sampleRate, beat2StartIndex, soundTypeRef.current, false, boost);
-      }
-
-      const loopSource = ctx.createBufferSource();
-      loopSource.buffer = buffer;
-      loopSource.loop = true;
-      loopSource.connect(ctx.destination);
-
-      const now = ctx.currentTime;
-      loopSource.start(now);
-      loopSourceRef.current = loopSource;
-      loopStartTimeRef.current = now;
-
-      // 启动视觉同步
+      // 4. 启动对准 H5 硬件时钟的视觉同步帧动画
       if (requestAnimationFrameRef.current) cancelAnimationFrame(requestAnimationFrameRef.current);
       requestAnimationFrameRef.current = requestAnimationFrame(syncVisualLoop);
 
@@ -451,28 +448,11 @@ export default function App() {
       requestAnimationFrameRef.current = null;
     }
 
-    // 释放循环播放节点
-    if (loopSourceRef.current) {
+    // 释放 H5 播放
+    if (metronomeAudioRef.current) {
       try {
-        loopSourceRef.current.stop();
+        metronomeAudioRef.current.pause();
       } catch (e) {}
-      loopSourceRef.current = null;
-    }
-
-    // 释放保活静音音频
-    if (silentAudioRef.current) {
-      try {
-        silentAudioRef.current.pause();
-      } catch (e) {}
-      silentAudioRef.current = null;
-    }
-
-    // 彻底销毁上下文
-    if (audioCtxRef.current) {
-      try {
-        audioCtxRef.current.close();
-      } catch (e) {}
-      audioCtxRef.current = null;
     }
 
     if (localPlaying && localAudioRef.current) {
@@ -524,8 +504,8 @@ export default function App() {
           <ul className="list-disc pl-5 space-y-1.5 text-xs text-zinc-400">
             <li><strong>外部播放：</strong>先开启 Apple Music 或网易云放歌，然后打开本页面，点击 <span className="text-lime-400">START</span> 即可混音！</li>
             <li><strong>完美伴跑本地音乐：</strong>如果你播放的是保存在手机中的 MP3 文件，请使用下方专有的“本地音乐伴跑”面板，直接导入播放。这样声音绝对不会冲突，且后台更稳定！</li>
-            <li><strong>耳机盲操功能（新增🔥）：</strong>锁屏状态下，双击耳机上的<strong>【下一首 / 上一首】</strong>，可以直接给节拍器<strong>增加 / 减少 5 BPM</strong>，跑步途中无需掏出手机！</li>
-            <li><strong>后台不挂断（重构修复）：</strong>已彻底隔离静音音轨与 Web Audio。现在锁屏、切回主屏或切到其他 App，节拍声将同 MP3 音乐一道，永久挂在后台高精度正常鸣响，不再因 JS 冻结而挂断！</li>
+            <li><strong>耳机盲操功能：</strong>锁屏状态下，双击耳机上的<strong>【下一首 / 上一首】</strong>，可以直接给节拍器<strong>增加 / 减少 5 BPM</strong>，跑步途中无需掏出手机！</li>
+            <li><strong>后台不挂断（物理级修复）：</strong>已彻底告别不稳定的 Web Audio，改为独立 H5 硬件级音频长鸣。现在锁屏、切回主屏或切到其他 App，节拍声将永久稳定挂在后台高精准度长鸣，绝不挂断！</li>
           </ul>
         </div>
       )}

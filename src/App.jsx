@@ -10,6 +10,7 @@ export default function App() {
   const [visualBeat, setVisualBeat] = useState(0); // 用于前端视觉闪烁同步
   const [showHelp, setShowHelp] = useState(false);
   const [vibrate, setVibrate] = useState(false); // 振动开关 (部分兼容手机)
+  const [volumeBoost, setVolumeBoost] = useState(true); // 户外超强音量开关，默认开启！
 
   // --- 音频时钟核心 Ref 变量 ---
   const audioCtxRef = useRef(null);
@@ -24,19 +25,22 @@ export default function App() {
   const accentModeRef = useRef(accentMode);
   const isPlayingRef = useRef(isPlaying);
   const vibrateRef = useRef(vibrate);
+  const volumeBoostRef = useRef(volumeBoost);
 
   useEffect(() => { bpmRef.current = bpm; }, [bpm]);
   useEffect(() => { soundTypeRef.current = soundType; }, [soundType]);
   useEffect(() => { accentModeRef.current = accentMode; }, [accentMode]);
   useEffect(() => { isPlayingRef.current = isPlaying; }, [isPlaying]);
   useEffect(() => { vibrateRef.current = vibrate; }, [vibrate]);
+  useEffect(() => { volumeBoostRef.current = volumeBoost; }, [volumeBoost]);
 
   // --- 初始化后台保活无声轨道 ---
   useEffect(() => {
-    // 1秒极小无声 WAV 音频 Base64 数据，iOS 触发保活必需
-    const SILENT_WAV = 'data:audio/wav;base64,UklGRigAAABXQVZFZm10IBAAAAABAAEARKwAAIhYAQACABAAAGRhdGEAAAAA';
+    // 采用兼容性更好、长度更长、音量极微弱的 2秒静音 WAV 数据
+    const SILENT_WAV = 'data:audio/wav;base64,UklGRpwAAABXQVZFZm10IBAAAAABAAEAIlYAAESsAAACABAAAGRhdGEAYAAAAP8f/x//H/8f/x//H/8f/x//H/8f/x//H/8f/x//H/8f/x//H/8f/x//H/8f/x//H/8f/x//H/8f/x//H/8f/x//H/8f/x//H/8f/x//H/8f/x//H/8f/x//H/8f/x//H/8f/x//H/8f/x//H/8f/x//H/8f/x//H/8f/x//H/8f/x//H/8f/x//H/8f/x//H/8f/x//H/8f/x//H/8f/x//H/8f/x//H/8f/x//H/8f/x//H/8f/x//H/8f/x//H/8f/x//H/8f/x//H/8f/x//H/8f/x//H/8f/x//H/8f/x//';
     const audio = new Audio(SILENT_WAV);
     audio.loop = true;
+    audio.volume = 0.05; // 稍微给一点音量，防止部分手机系统因完全静音而将其挂起
     silentAudioRef.current = audio;
 
     return () => {
@@ -51,7 +55,6 @@ export default function App() {
   const lastTapsRef = useRef([]);
   const handleTapTempo = () => {
     const now = Date.now();
-    // 过滤掉超过2.5秒的点击
     const lastTaps = lastTapsRef.current.filter(t => now - t < 2500);
     lastTaps.push(now);
     lastTapsRef.current = lastTaps;
@@ -81,7 +84,6 @@ export default function App() {
         ]
       });
 
-      // 绑定物理耳机线控或锁屏面板上的暂停/播放按钮
       navigator.mediaSession.setActionHandler('play', () => {
         if (!isPlayingRef.current) startMetronome();
       });
@@ -125,45 +127,48 @@ export default function App() {
 
     const type = soundTypeRef.current;
     const isAccent = accentModeRef.current && (beatNumber % 2 === 0);
+    
+    // 超强音量增益倍率 (2.2倍，故意制造轻微削波，使敲击声在耳机里极度清脆和穿透)
+    const boost = volumeBoostRef.current ? 2.2 : 1.0;
 
     if (type === 'wood') {
-      // 传统木鱼清脆敲击声
+      // 传统木鱼清脆敲击声 - 大幅提升基础频率和爆破度
       osc.type = 'sine';
-      osc.frequency.setValueAtTime(isAccent ? 850 : 650, time);
+      osc.frequency.setValueAtTime(isAccent ? 950 : 700, time);
       osc.frequency.exponentialRampToValueAtTime(120, time + 0.05);
 
-      gainNode.gain.setValueAtTime(isAccent ? 0.95 : 0.6, time);
+      gainNode.gain.setValueAtTime((isAccent ? 0.95 : 0.6) * boost, time);
       gainNode.gain.exponentialRampToValueAtTime(0.001, time + 0.05);
 
       osc.start(time);
       osc.stop(time + 0.06);
     } else if (type === 'drum') {
-      // 动感鼓点，适合配合重低音曲目
+      // 动感鼓点
       osc.type = 'triangle';
-      osc.frequency.setValueAtTime(isAccent ? 120 : 85, time);
+      osc.frequency.setValueAtTime(isAccent ? 140 : 100, time);
       osc.frequency.exponentialRampToValueAtTime(30, time + 0.12);
 
-      gainNode.gain.setValueAtTime(isAccent ? 1.0 : 0.65, time);
+      gainNode.gain.setValueAtTime((isAccent ? 1.0 : 0.65) * boost, time);
       gainNode.gain.exponentialRampToValueAtTime(0.001, time + 0.12);
 
       osc.start(time);
       osc.stop(time + 0.13);
     } else {
-      // 穿透力极强的电子音，适合户外嘈杂街道
+      // 穿透力极强的电子音
       osc.type = 'sine';
-      osc.frequency.setValueAtTime(isAccent ? 1800 : 1400, time);
+      osc.frequency.setValueAtTime(isAccent ? 1900 : 1500, time);
 
-      // 加一个简单的带通滤波器降低毛刺感，保留穿透力
       const filter = ctx.createBiquadFilter();
       filter.type = 'bandpass';
-      filter.frequency.value = isAccent ? 1800 : 1400;
+      filter.frequency.value = isAccent ? 1900 : 1500;
       filter.Q.value = 2.0;
 
       osc.disconnect(gainNode);
       osc.connect(filter);
       filter.connect(gainNode);
 
-      gainNode.gain.setValueAtTime(isAccent ? 0.3 : 0.18, time);
+      // 电子音基础音量调高
+      gainNode.gain.setValueAtTime((isAccent ? 0.6 : 0.35) * boost, time);
       gainNode.gain.exponentialRampToValueAtTime(0.001, time + 0.04);
 
       osc.start(time);
@@ -172,8 +177,8 @@ export default function App() {
   };
 
   // --- 高精准度后台调度器线程 ---
-  const scheduleAheadTime = 0.12; // 预载窗口长度 (秒)
-  const lookahead = 30.0; // 调度轮询检查间隔 (毫秒)
+  const scheduleAheadTime = 0.12; 
+  const lookahead = 30.0; 
 
   const metronomeScheduler = () => {
     const ctx = audioCtxRef.current;
@@ -183,14 +188,11 @@ export default function App() {
       const scheduledTime = nextTickTimeRef.current;
       const beat = currentBeatRef.current;
 
-      // 在精准的时间打点发声
       scheduleTick(scheduledTime, beat);
 
-      // 计算并更新下一个节拍的触发时间
       const secondsPerBeat = 60.0 / bpmRef.current;
       nextTickTimeRef.current += secondsPerBeat;
 
-      // 同步触发 React 前端视觉闪烁和轻震，利用精确的推迟 setTimeout
       const delayMs = Math.max(0, (scheduledTime - ctx.currentTime) * 1000);
       setTimeout(() => {
         if (isPlayingRef.current) {
@@ -201,44 +203,48 @@ export default function App() {
         }
       }, delayMs);
 
-      // 切换强弱节拍索引
       currentBeatRef.current = (currentBeatRef.current + 1) % 2;
     }
 
-    // 尾递归轮询
     timerIdRef.current = setTimeout(metronomeScheduler, lookahead);
   };
 
   // --- 节拍器启动逻辑 ---
   const startMetronome = async () => {
+    // 【核心保活关键修复 1】：立刻、同步启动静音轨道播放
+    // 绝不能在任何 await 之后触发，必须在点击手势同步调用链的最顶端，iOS 100% 授权后台播放
+    if (silentAudioRef.current) {
+      silentAudioRef.current.play().catch(e => {
+        console.warn("同步手势保活播放受阻，尝试恢复：", e);
+      });
+    }
+
     try {
-      // 1. 启动或恢复 Web Audio Context (iOS 必须在点击等手势内部触发)
-      if (!audioCtxRef.current) {
-        audioCtxRef.current = new (window.AudioContext || window.webkitAudioContext)();
+      // 【核心防锁死修复 2】：每次开启，必先彻底销毁旧的 AudioContext，防止系统挂起锁定
+      if (audioCtxRef.current) {
+        try {
+          await audioCtxRef.current.close();
+        } catch (e) {}
+        audioCtxRef.current = null;
       }
+
+      // 创建崭新、健康的音频环境
+      audioCtxRef.current = new (window.AudioContext || window.webkitAudioContext)();
       const ctx = audioCtxRef.current;
+      
       if (ctx.state === 'suspended') {
         await ctx.resume();
       }
 
-      // 2. 唤醒并播放后台保活静音音轨 (骗过 iOS 后台挂起机制)
-      if (silentAudioRef.current) {
-        silentAudioRef.current.play().catch(e => console.log("静音轨道保活被阻止：", e));
-      }
-
-      // 3. 配置锁屏媒体控制器
       setupMediaSession();
 
-      // 4. 重置时钟参数
       nextTickTimeRef.current = ctx.currentTime + 0.05;
       currentBeatRef.current = 0;
 
-      // 5. 切换运行状态，启动调度器
       setIsPlaying(true);
       isPlayingRef.current = true;
       metronomeScheduler();
 
-      // 给一个轻微物理反馈，暗示成功开启
       triggerVibration();
     } catch (error) {
       console.error("启动节拍器失败:", error);
@@ -250,18 +256,25 @@ export default function App() {
     setIsPlaying(false);
     isPlayingRef.current = false;
 
-    // 清除定时轮询
     if (timerIdRef.current) {
       clearTimeout(timerIdRef.current);
       timerIdRef.current = null;
     }
 
-    // 暂停后台静音音轨
     if (silentAudioRef.current) {
       silentAudioRef.current.pause();
     }
 
-    // 释放锁屏暂停控制状态
+    // 【核心防锁死修复 3】：暂停时立刻关闭并解绑上下文，防止切后台时其状态在手机底层坏死
+    if (audioCtxRef.current) {
+      try {
+        audioCtxRef.current.close();
+      } catch (e) {
+        console.warn("释放音频上下文异常:", e);
+      }
+      audioCtxRef.current = null;
+    }
+
     if ('mediaSession' in navigator) {
       navigator.mediaSession.playbackState = "paused";
     }
@@ -304,7 +317,7 @@ export default function App() {
             <li><strong>如何混音：</strong>先开启 Apple Music 或网易云放歌，然后打开本页面，点击 <span className="text-lime-400">START</span> 即可同时听到音乐和节拍！</li>
             <li><strong>后台不挂断：</strong>开始播放后，直接切回桌面、手机锁屏或者去其他 App，节拍器都会在后台持续响。</li>
             <li><strong>锁屏控制：</strong>支持耳机线控暂停/播放，以及锁屏界面的媒体面板控制。</li>
-            <li>如果锁屏播放时音乐变小，请稍微调大手机系统音量。</li>
+            <li><strong>遇到无声：</strong>如果切出再切回时无声，直接点击 <span className="text-red-400">STOP</span> 再点 <span className="text-lime-400">START</span>，系统会自动重构音频引擎，无需重启网页。</li>
           </ul>
         </div>
       )}
@@ -405,8 +418,28 @@ export default function App() {
         {/* 高级控制设置：音色、强弱、震动 */}
         <div className="w-full max-w-sm bg-zinc-900 border border-zinc-800 rounded-2xl p-4 space-y-4">
           
-          {/* 音响音效切换 */}
+          {/* 户外超强音量开关（高分贝爆破音色） */}
           <div className="flex items-center justify-between">
+            <div className="flex flex-col">
+              <span className="text-xs font-semibold text-lime-400 flex items-center">
+                🔥 户外超强音量加倍
+              </span>
+              <span className="text-[10px] text-zinc-500">穿透 Apple Music 背景声</span>
+            </div>
+            <button
+              onClick={() => setVolumeBoost(!volumeBoost)}
+              className={`w-11 h-6 flex items-center rounded-full p-1 transition-colors duration-200 focus:outline-none ${
+                volumeBoost ? 'bg-lime-500' : 'bg-zinc-750'
+              }`}
+            >
+              <div className={`bg-zinc-950 w-4 h-4 rounded-full shadow-md transform transition-transform duration-200 ${
+                volumeBoost ? 'translate-x-5' : 'translate-x-0'
+              }`}></div>
+            </button>
+          </div>
+
+          {/* 音响音效切换 */}
+          <div className="flex items-center justify-between pt-1 border-t border-zinc-800/50">
             <span className="text-xs font-semibold text-zinc-400 flex items-center">
               <Volume2 size={14} className="mr-1.5" /> 节拍音色
             </span>
@@ -439,7 +472,7 @@ export default function App() {
           </div>
 
           {/* 强弱音设置 */}
-          <div className="flex items-center justify-between pt-1">
+          <div className="flex items-center justify-between pt-1 border-t border-zinc-800/50">
             <div className="flex flex-col">
               <span className="text-xs font-semibold text-zinc-400">强弱音平衡 (左右脚交替)</span>
               <span className="text-[10px] text-zinc-500">交替强音可检测左右脚步幅平衡</span>

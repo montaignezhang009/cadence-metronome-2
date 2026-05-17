@@ -1,0 +1,38 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+  <title>极简步频节拍器 | Run Cadence Metronome</title>
+  
+  <!-- Tailwind CSS CDN -->
+  <script src="https://cdn.tailwindcss.com"></script>
+  
+  <!-- 手机端网页 App 优化 (PWA 伪装设置) -->
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="theme-color" content="#09090b">
+  
+  <style>
+    /* 屏蔽移动端的长按选中与回弹反馈，营造原生 App 的手感 */
+    body {
+      -webkit-touch-callout: none;
+      -webkit-user-select: none;
+      user-select: none;
+      background-color: #09090b; /* 极黑底色，省电护眼 */
+    }
+    
+    /* 解决 iOS 安全区底部白边问题 */
+    .pb-safe {
+      padding-bottom: calc(env(safe-area-inset-bottom) + 1rem);
+    }
+    .pt-safe {
+      padding-top: calc(env(safe-area-inset-top) + 1rem);
+    }
+  </style>
+</head>
+<body class="text-zinc-100 overflow-x-hidden antialiased">
+  <div id="root"></div>
+  <script type="module" src="/src/main.jsx"></script>
+</body>
+</html>

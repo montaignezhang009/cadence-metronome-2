@@ -1,6 +1,9 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { Play, Square, Plus, Minus, Volume2, Info, Check, HelpCircle } from 'lucide-react';
 
+// 采用兼容性更好、长度更长、音量极微弱的 2秒静音 WAV 数据
+const SILENT_WAV = 'data:audio/wav;base64,UklGRpwAAABXQVZFZm10IBAAAAABAAEAIlYAAESsAAACABAAAGRhdGEAYAAAAP8f/x//H/8f/x//H/8f/x//H/8f/x//H/8f/x//H/8f/x//H/8f/x//H/8f/x//H/8f/x//H/8f/x//H/8f/x//H/8f/x//H/8f/x//H/8f/x//H/8f/x//H/8f/x//H/8f/x//H/8f/x//H/8f/x//H/8f/x//H/8f/x//H/8f/x//H/8f/x//H/8f/x//H/8f/x//H/8f/x//H/8f/x//H/8f/x//H/8f/x//H/8f/x//H/8f/x//H/8f/x//H/8f/x//H/8f/x//H/8f/x//H/8f/x//H/8f/x//H/8f/x//';
+
 export default function App() {
   // --- 状态管理 ---
   const [bpm, setBpm] = useState(150);
@@ -34,20 +37,16 @@ export default function App() {
   useEffect(() => { vibrateRef.current = vibrate; }, [vibrate]);
   useEffect(() => { volumeBoostRef.current = volumeBoost; }, [volumeBoost]);
 
-  // --- 初始化后台保活无声轨道 ---
+  // --- 初始化与注销清理 ---
   useEffect(() => {
-    // 采用兼容性更好、长度更长、音量极微弱的 2秒静音 WAV 数据
-    const SILENT_WAV = 'data:audio/wav;base64,UklGRpwAAABXQVZFZm10IBAAAAABAAEAIlYAAESsAAACABAAAGRhdGEAYAAAAP8f/x//H/8f/x//H/8f/x//H/8f/x//H/8f/x//H/8f/x//H/8f/x//H/8f/x//H/8f/x//H/8f/x//H/8f/x//H/8f/x//H/8f/x//H/8f/x//H/8f/x//H/8f/x//H/8f/x//H/8f/x//H/8f/x//H/8f/x//H/8f/x//H/8f/x//H/8f/x//H/8f/x//H/8f/x//H/8f/x//H/8f/x//H/8f/x//H/8f/x//H/8f/x//H/8f/x//H/8f/x//H/8f/x//H/8f/x//H/8f/x//H/8f/x//H/8f/x//H/8f/x//';
-    const audio = new Audio(SILENT_WAV);
-    audio.loop = true;
-    audio.volume = 0.05; // 稍微给一点音量，防止部分手机系统因完全静音而将其挂起
-    silentAudioRef.current = audio;
-
     return () => {
-      if (audio) {
-        audio.pause();
-      }
       if (timerIdRef.current) clearTimeout(timerIdRef.current);
+      if (silentAudioRef.current) {
+        try {
+          silentAudioRef.current.pause();
+        } catch (e) {}
+        silentAudioRef.current = null;
+      }
     };
   }, []);
 
@@ -210,30 +209,45 @@ export default function App() {
   };
 
   // --- 节拍器启动逻辑 ---
-  const startMetronome = async () => {
-    // 【核心保活关键修复 1】：立刻、同步启动静音轨道播放
-    // 绝不能在任何 await 之后触发，必须在点击手势同步调用链的最顶端，iOS 100% 授权后台播放
-    if (silentAudioRef.current) {
-      silentAudioRef.current.play().catch(e => {
-        console.warn("同步手势保活播放受阻，尝试恢复：", e);
-      });
-    }
-
+  const startMetronome = () => {
     try {
-      // 【核心防锁死修复 2】：每次开启，必先彻底销毁旧的 AudioContext，防止系统挂起锁定
+      // 1. 彻底销毁和重置任何历史音频上下文，避免挂起锁定
       if (audioCtxRef.current) {
         try {
-          await audioCtxRef.current.close();
+          audioCtxRef.current.close();
         } catch (e) {}
         audioCtxRef.current = null;
       }
+      if (silentAudioRef.current) {
+        try {
+          silentAudioRef.current.pause();
+        } catch (e) {}
+        silentAudioRef.current = null;
+      }
 
-      // 创建崭新、健康的音频环境
-      audioCtxRef.current = new (window.AudioContext || window.webkitAudioContext)();
-      const ctx = audioCtxRef.current;
-      
+      // 2. 创建全新的混音音频环境
+      const ctx = new (window.AudioContext || window.webkitAudioContext)();
+      audioCtxRef.current = ctx;
+
+      // 3. 必须在同步点击手势回调的第一时间，创建并播放 Audio 标签
+      const audio = new Audio(SILENT_WAV);
+      audio.loop = true;
+      audio.volume = 0.05; // 微弱音量使系统保活器保持活跃
+      silentAudioRef.current = audio;
+
+      // 4. 【核心保活混音机制】：
+      // 将 HTML5 的无声 Audio 节点重定向挂载到 Web Audio 图中！
+      // 只要挂载了，iOS 系统就会将该媒体播放降级为“音效/Ambient”级别，从而绝不暂停 Apple Music，实现完美混音！
+      const source = ctx.createMediaElementSource(audio);
+      source.connect(ctx.destination);
+
+      // 5. 同步播放
+      audio.play().catch(e => {
+        console.warn("同步手势保活播放受阻，尝试恢复：", e);
+      });
+
       if (ctx.state === 'suspended') {
-        await ctx.resume();
+        ctx.resume();
       }
 
       setupMediaSession();
@@ -261,17 +275,19 @@ export default function App() {
       timerIdRef.current = null;
     }
 
+    // 释放保活静音音频
     if (silentAudioRef.current) {
-      silentAudioRef.current.pause();
+      try {
+        silentAudioRef.current.pause();
+      } catch (e) {}
+      silentAudioRef.current = null;
     }
 
-    // 【核心防锁死修复 3】：暂停时立刻关闭并解绑上下文，防止切后台时其状态在手机底层坏死
+    // 暂停时立刻释放 Web Audio 上下文，防止其状态在手机底层挂起锁死
     if (audioCtxRef.current) {
       try {
         audioCtxRef.current.close();
-      } catch (e) {
-        console.warn("释放音频上下文异常:", e);
-      }
+      } catch (e) {}
       audioCtxRef.current = null;
     }
 

@@ -73,7 +73,7 @@ export default function App() {
   const silentAudioRef = useRef(null);
   const localAudioRef = useRef(null); // 本地音乐播放器 HTML5 Audio 指针
 
-  // 【核心机制重构】：使用 Web Audio 原生的硬件循环节点，替代不稳的 JS 定时器
+  // 使用 Web Audio 原生的硬件循环节点，确保打点绝对精准
   const loopSourceRef = useRef(null);
   const loopStartTimeRef = useRef(0);
   const requestAnimationFrameRef = useRef(null);
@@ -85,6 +85,7 @@ export default function App() {
   const isPlayingRef = useRef(isPlaying);
   const vibrateRef = useRef(vibrate);
   const volumeBoostRef = useRef(volumeBoost);
+  const localPlayingRef = useRef(localPlaying);
 
   useEffect(() => { bpmRef.current = bpm; }, [bpm]);
   useEffect(() => { soundTypeRef.current = soundType; }, [soundType]);
@@ -92,6 +93,7 @@ export default function App() {
   useEffect(() => { isPlayingRef.current = isPlaying; }, [isPlaying]);
   useEffect(() => { vibrateRef.current = vibrate; }, [vibrate]);
   useEffect(() => { volumeBoostRef.current = volumeBoost; }, [volumeBoost]);
+  useEffect(() => { localPlayingRef.current = localPlaying; }, [localPlaying]);
 
   // 时间格式化辅助函数 (秒 -> MM:SS)
   const formatTime = (secs) => {
@@ -101,7 +103,7 @@ export default function App() {
     return `${m}:${s}`;
   };
 
-  // --- 视觉动画帧同步器 (只在页面可见、且在运行状态下激活，完美省电) ---
+  // --- 视觉动画帧同步器 (只在页面可见、且在运行状态下激活) ---
   const syncVisualLoop = () => {
     if (!isPlayingRef.current || !audioCtxRef.current) return;
 
@@ -296,12 +298,13 @@ export default function App() {
   };
 
   // --- 系统锁屏 MediaSession 媒体控制项同步 ---
+  // 新增跑步盲操神技：双击耳机切歌键（Next/Prev）可在后台加/减 5 BPM
   const setupMediaSession = () => {
     if ('mediaSession' in navigator) {
       navigator.mediaSession.metadata = new MediaMetadata({
         title: `🏃‍♂️ 步频节拍器: ${bpmRef.current} BPM`,
-        artist: localFile ? `伴跑音乐: ${localFile.name}` : '后台保活稳定运行中',
-        album: '可与伴跑音乐/外部音频完美混音',
+        artist: localFile ? `伴跑音乐: ${localFile.name}` : '后台稳定伴跑中',
+        album: '双击耳机[下一曲/上一曲]可加减5步频',
         artwork: [
           { src: 'https://images.unsplash.com/photo-1476480862126-209bfaa8edc8?w=512&h=512&fit=crop', sizes: '512x512', type: 'image/jpeg' }
         ]
@@ -309,11 +312,21 @@ export default function App() {
 
       navigator.mediaSession.setActionHandler('play', () => {
         if (!isPlayingRef.current) startMetronome();
-        if (localFile && !localPlaying) toggleLocalMusic();
+        if (localFile && !localPlayingRef.current) toggleLocalMusic();
       });
       navigator.mediaSession.setActionHandler('pause', () => {
         if (isPlayingRef.current) stopMetronome();
-        if (localPlaying) toggleLocalMusic();
+        if (localPlayingRef.current) toggleLocalMusic();
+      });
+
+      // 绑定耳机按键盲操：上一曲减 5 BPM，下一曲加 5 BPM
+      navigator.mediaSession.setActionHandler('previoustrack', () => {
+        changeBpm(-5);
+        triggerVibration();
+      });
+      navigator.mediaSession.setActionHandler('nexttrack', () => {
+        changeBpm(5);
+        triggerVibration();
       });
     }
   };
@@ -361,15 +374,15 @@ export default function App() {
       const ctx = new (window.AudioContext || window.webkitAudioContext)();
       audioCtxRef.current = ctx;
 
-      // 3. 手势第一时间开启保活动作
+      // 3. 【绝对核心保活漏洞攻克】：
+      // 我们在手势回调的第一时间声明、播放 HTML5 无声音频。
+      // 【关键修改】：绝对不能执行 `ctx.createMediaElementSource(audio)` 挂载到 Web Audio 图中！
+      // 一旦挂载，iOS 就会把它们视作一体，从而切后台时将两者一起强制冻结。
+      // 保持其独立直接播放（不挂载），iOS 就会将其判定为“系统原生媒体流”，从而为当前浏览器标签页永久保留后台音频执行权！
       const audio = new Audio(SILENT_WAV);
       audio.loop = true;
-      audio.volume = 0.05;
+      audio.volume = 0.01; // 保持极弱音量维持底层 CoreAudio 会话活跃
       silentAudioRef.current = audio;
-
-      // 重定向静音到 Web Audio
-      const source = ctx.createMediaElementSource(audio);
-      source.connect(ctx.destination);
 
       audio.play().catch(e => {
         console.warn("同步手势保活播放受阻，尝试恢复：", e);
@@ -384,7 +397,7 @@ export default function App() {
       setIsPlaying(true);
       isPlayingRef.current = true;
 
-      // 4. 初始化硬件音频内存循环节点（利用浏览器底层 C++ 音频渲染线程进行完美循环）
+      // 4. 初始化硬件音频内存循环节点（利用 C++ 硬件音频线程在底层完美不中断循环）
       const beatDuration = 60.0 / bpmRef.current;
       const cycleDuration = accentModeRef.current ? beatDuration * 2 : beatDuration;
       const sampleRate = ctx.sampleRate;
@@ -412,7 +425,7 @@ export default function App() {
       loopSourceRef.current = loopSource;
       loopStartTimeRef.current = now;
 
-      // 启动对准真实硬件时钟的视觉同步帧动画（仅在前台运行时消费，切后台自动挂起以省电）
+      // 启动视觉同步
       if (requestAnimationFrameRef.current) cancelAnimationFrame(requestAnimationFrameRef.current);
       requestAnimationFrameRef.current = requestAnimationFrame(syncVisualLoop);
 
@@ -511,7 +524,8 @@ export default function App() {
           <ul className="list-disc pl-5 space-y-1.5 text-xs text-zinc-400">
             <li><strong>外部播放：</strong>先开启 Apple Music 或网易云放歌，然后打开本页面，点击 <span className="text-lime-400">START</span> 即可混音！</li>
             <li><strong>完美伴跑本地音乐：</strong>如果你播放的是保存在手机中的 MP3 文件，请使用下方专有的“本地音乐伴跑”面板，直接导入播放。这样声音绝对不会冲突，且后台更稳定！</li>
-            <li><strong>后台不挂断（重构修复）：</strong>全新硬件级时钟已部署。现在锁屏、切回主屏或切到其他 App，节拍声将同 MP3 音乐一道，永久挂在后台高精度正常鸣响，不再因 JS 冻结而挂断！</li>
+            <li><strong>耳机盲操功能（新增🔥）：</strong>锁屏状态下，双击耳机上的<strong>【下一首 / 上一首】</strong>，可以直接给节拍器<strong>增加 / 减少 5 BPM</strong>，跑步途中无需掏出手机！</li>
+            <li><strong>后台不挂断（重构修复）：</strong>已彻底隔离静音音轨与 Web Audio。现在锁屏、切回主屏或切到其他 App，节拍声将同 MP3 音乐一道，永久挂在后台高精度正常鸣响，不再因 JS 冻结而挂断！</li>
           </ul>
         </div>
       )}

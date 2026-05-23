@@ -11,26 +11,14 @@ const writeString = (view, offset, string) => {
 // --- 外部辅助函数：实时在内存中合成高穿透力的节拍波形 ---
 const synthesizeTickToBuffer = (channelData, sampleRate, startIndex, type, isAccent, boost) => {
   if (type === 'wood') {
-    // 传统木鱼清脆敲击声 - 双正弦波叠加模拟空腔木质共鸣，配合双曲正切软饱和，音色更加温润、真实、古朴
-    const duration = 0.08; // 80ms 爆破木鱼声，略微延长余音使其更自然、丰满
+    // 木鱼音色 - 纯净高频电子脉冲波，施加软限幅，作为默认清脆敲击节拍
+    const duration = 0.04;
     const numSamples = Math.floor(duration * sampleRate);
     for (let i = 0; i < numSamples; i++) {
       const t = i / sampleRate;
-      // 振幅衰减曲线：前期极速爆破，中后期温润余音
-      const amp = Math.exp(-t / 0.016) * (isAccent ? 0.90 : 0.58) * boost;
-      
-      // 基音指数扫频由高到低，模拟敲击瞬间的爆破感
-      const fStart = isAccent ? 850 : 680;
-      const fEnd = 160;
-      const tau_f = 0.014;
-      const phase = 2 * Math.PI * (fEnd * t - (fStart - fEnd) * tau_f * (Math.exp(-t / tau_f) - 1));
-      
-      // 核心声学建模：叠加 1.58 倍的非谐和泛音，完美还原木鱼内部中空的“木质敲击共振腔体”
-      const fundamental = Math.sin(phase);
-      const resonance = Math.sin(phase * 1.58);
-      
-      // 混合基音与空气腔共振，并使用 Math.tanh 进行模拟软饱和，100% 消除硬剪切毛刺，保留松木打击弹性
-      const rawSample = (fundamental + 0.18 * resonance) * amp;
+      const amp = Math.exp(-t / 0.008) * (isAccent ? 0.6 : 0.35) * boost;
+      const freq = isAccent ? 1900 : 1500;
+      const rawSample = Math.sin(2 * Math.PI * freq * t) * amp;
       channelData[startIndex + i] = Math.tanh(rawSample);
     }
   } else if (type === 'drum') {
@@ -49,14 +37,26 @@ const synthesizeTickToBuffer = (channelData, sampleRate, startIndex, type, isAcc
       channelData[startIndex + i] = Math.tanh(triangle * amp);
     }
   } else {
-    // 电子滴答音 - 纯净高频电子脉冲波，同样施加软限幅
-    const duration = 0.04;
+    // 电子音色 - 双正弦波叠加模拟空腔共鸣，配合双曲正切软饱和，温润饱满的敲击声
+    const duration = 0.08; // 80ms 爆破敲击声，略微延长余音使其更自然、丰满
     const numSamples = Math.floor(duration * sampleRate);
     for (let i = 0; i < numSamples; i++) {
       const t = i / sampleRate;
-      const amp = Math.exp(-t / 0.008) * (isAccent ? 0.6 : 0.35) * boost;
-      const freq = isAccent ? 1900 : 1500;
-      const rawSample = Math.sin(2 * Math.PI * freq * t) * amp;
+      // 振幅衰减曲线：前期极速爆破，中后期温润余音
+      const amp = Math.exp(-t / 0.016) * (isAccent ? 0.90 : 0.58) * boost;
+      
+      // 基音指数扫频由高到低，模拟敲击瞬间的爆破感
+      const fStart = isAccent ? 850 : 680;
+      const fEnd = 160;
+      const tau_f = 0.014;
+      const phase = 2 * Math.PI * (fEnd * t - (fStart - fEnd) * tau_f * (Math.exp(-t / tau_f) - 1));
+      
+      // 核心声学建模：叠加 1.58 倍的非谐和泛音，完美还原木鱼内部中空的“木质敲击共振腔体”
+      const fundamental = Math.sin(phase);
+      const resonance = Math.sin(phase * 1.58);
+      
+      // 混合基音与空气腔共振，并使用 Math.tanh 进行模拟软饱和，100% 消除硬剪切毛刺，保留松木打击弹性
+      const rawSample = (fundamental + 0.18 * resonance) * amp;
       channelData[startIndex + i] = Math.tanh(rawSample);
     }
   }
@@ -582,33 +582,33 @@ export default function App() {
         {/* 快速预设模式按钮 - 大块设计利于盲操作 */}
         <div className="w-full max-w-sm grid grid-cols-3 gap-3 mb-5">
           <button 
-            onClick={() => { setBpm(120); updateMediaSessionBpm(120); }}
+            onClick={() => { setBpm(130); updateMediaSessionBpm(130); }}
             className={`p-3 rounded-2xl flex flex-col items-center transition ${
-              bpm === 120 ? 'bg-zinc-100 text-zinc-950 font-bold' : 'bg-zinc-900 text-zinc-300 hover:bg-zinc-850'
+              bpm === 130 ? 'bg-zinc-100 text-zinc-950 font-bold' : 'bg-zinc-900 text-zinc-300 hover:bg-zinc-850'
             }`}
           >
             <span className="text-lg">🚶‍♂️</span>
-            <span className="text-sm mt-0.5">120</span>
+            <span className="text-sm mt-0.5">130</span>
             <span className="text-[9px] opacity-70">慢步恢复</span>
           </button>
           <button 
-            onClick={() => { setBpm(150); updateMediaSessionBpm(150); }}
+            onClick={() => { setBpm(160); updateMediaSessionBpm(160); }}
             className={`p-3 rounded-2xl flex flex-col items-center transition ${
-              bpm === 150 ? 'bg-zinc-100 text-zinc-950 font-bold' : 'bg-zinc-900 text-zinc-300 hover:bg-zinc-850'
+              bpm === 160 ? 'bg-zinc-100 text-zinc-950 font-bold' : 'bg-zinc-900 text-zinc-300 hover:bg-zinc-850'
             }`}
           >
             <span className="text-lg">🏃‍♂️</span>
-            <span className="text-sm mt-0.5">150</span>
+            <span className="text-sm mt-0.5">160</span>
             <span className="text-[9px] opacity-70">快速健走</span>
           </button>
           <button 
-            onClick={() => { setBpm(180); updateMediaSessionBpm(180); }}
+            onClick={() => { setBpm(190); updateMediaSessionBpm(190); }}
             className={`p-3 rounded-2xl flex flex-col items-center transition ${
-              bpm === 180 ? 'bg-zinc-100 text-zinc-950 font-bold' : 'bg-zinc-900 text-zinc-300 hover:bg-zinc-850'
+              bpm === 190 ? 'bg-zinc-100 text-zinc-950 font-bold' : 'bg-zinc-900 text-zinc-300 hover:bg-zinc-850'
             }`}
           >
             <span className="text-lg">🚀</span>
-            <span className="text-sm mt-0.5">180</span>
+            <span className="text-sm mt-0.5">190</span>
             <span className="text-[9px] opacity-70">黄金慢跑</span>
           </button>
         </div>

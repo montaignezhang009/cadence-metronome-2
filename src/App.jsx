@@ -27,7 +27,7 @@ const synthesizeTickToBuffer = (channelData, sampleRate, startIndex, type, isAcc
     const numSamples = Math.floor(duration * sampleRate);
     for (let i = 0; i < numSamples; i++) {
       const t = i / sampleRate;
-      const amp = Math.exp(-t / 0.03) * (isAccent ? 1.0 : 0.65) * boost;
+      const amp = Math.exp(-t / 0.03) * (isAccent ? 1.6 : 1.1) * boost;
       const fStart = isAccent ? 140 : 100;
       const fEnd = 30;
       const tau_f = 0.04;
@@ -115,7 +115,7 @@ const createWavBlob = (bpm, soundType, accentMode, volumeBoost) => {
 
 export default function App() {
   // --- 状态管理 ---
-  const [bpm, setBpm] = useState(150);
+  const [bpm, setBpm] = useState(160);
   const [isPlaying, setIsPlaying] = useState(false);
   const [soundType, setSoundType] = useState('wood'); // wood (木鱼), electronic (电子音), drum (鼓点)
   const [accentMode, setAccentMode] = useState(true); // 强弱交替，模拟左右脚落地轻重平衡
